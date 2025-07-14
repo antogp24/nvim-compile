@@ -2,20 +2,9 @@ local M = {
     last_command = nil,
     last_window = nil,
     BUFFER_NAME = "compile-output",
+    buffer = nil,
     process_handles = {},
 }
-
--- @param name string
-function M.get_buffer_by_name(name)
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-        local buf_full_path = vim.api.nvim_buf_get_name(buf)
-        local buf_name = vim.fn.fnamemodify(buf_full_path, ":t")
-        if buf_name == name then
-            return buf
-        end
-    end
-    return nil
-end
 
 -- @param file_path string
 -- @param line number
@@ -85,39 +74,44 @@ end
 -- @param command string
 -- @param output string: stdout of the command just ran
 function M.create_output_buffer(command, output)
-    local existing_buf = M.get_buffer_by_name(M.BUFFER_NAME)
-    if existing_buf then
-        vim.api.nvim_buf_delete(existing_buf, { force = true })
+    if M.buffer then
+        vim.api.nvim_buf_delete(M.buffer, { force = true })
     end
 
     local header = string.format("> %s", command)
 
-    local buf = vim.api.nvim_create_buf(true, true)
-    vim.api.nvim_buf_set_name(buf, M.BUFFER_NAME)
-    vim.api.nvim_buf_set_option(buf, "buftype", "nofile")
-    vim.api.nvim_buf_set_option(buf, "bufhidden", "hide")
+    M.buffer = vim.api.nvim_create_buf(true, true)
+    vim.api.nvim_buf_set_name(M.buffer, M.BUFFER_NAME)
+    vim.api.nvim_buf_set_option(M.buffer, "buftype", "nofile")
+    vim.api.nvim_buf_set_option(M.buffer, "bufhidden", "hide")
 
-    vim.api.nvim_buf_set_keymap(buf, "n", "<C-c>", '', {
+    vim.api.nvim_buf_set_keymap(M.buffer, "n", "<C-c>", '', {
         noremap = true,
         silent = true,
         callback = M.kill_processes,
     })
-    vim.api.nvim_buf_set_keymap(buf, "n", "<CR>", "", {
+    vim.api.nvim_buf_set_keymap(M.buffer, "n", "<CR>", "", {
         noremap = true,
         silent = true,
         callback = M.open_link_under_cursor,
     })
-    vim.api.nvim_buf_set_keymap(buf, "n", "<Esc>", ":bd<CR>", { noremap = true, silent = true })
-    vim.api.nvim_buf_set_keymap(buf, "n", "q", ":bd<CR>", { noremap = true, silent = true })
+    vim.api.nvim_buf_set_keymap(M.buffer, "n", "<Esc>", ":bd<CR>", { noremap = true, silent = true })
+    vim.api.nvim_buf_set_keymap(M.buffer, "n", "q", ":bd<CR>", { noremap = true, silent = true })
 
-    vim.api.nvim_buf_set_lines(buf, 0, 0, false, { header })
-    vim.api.nvim_buf_set_lines(buf, -1, -1, false, vim.split(output, "\n"))
-    vim.api.nvim_buf_set_option(buf, "modifiable", false)
+    vim.api.nvim_create_autocmd({'BufDelete'}, {
+        buffer = M.buffer,
+        callback = function(event)
+            M.buffer = nil
+        end
+    })
+
+    vim.api.nvim_buf_set_lines(M.buffer, 0, 0, false, { header })
+    vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, vim.split(output, "\n"))
 
     M.last_window = vim.api.nvim_get_current_win()
     vim.api.nvim_command("split")
     local win = vim.api.nvim_get_current_win()
-    vim.api.nvim_win_set_buf(win, buf)
+    vim.api.nvim_win_set_buf(win, M.buffer)
     vim.api.nvim_win_set_height(win, 10)
 end
 
@@ -128,18 +122,17 @@ function M.execute(command, async)
         local result = vim.fn.system(command)
         M.create_output_buffer(command, result)
     else
-        M.create_output_buffer(command, "running...")
+        M.create_output_buffer(command, '')
 
-        local output = {}
         local stdin = vim.uv.new_pipe()
         local stdout = vim.uv.new_pipe()
         local stderr = vim.uv.new_pipe()
 
         local options = { stdio = {stdin, stdout, stderr} }
         local on_exit = function(code, signal)
+            vim.api.nvim_buf_set_option(M.buffer, "modifiable", false)
             vim.uv.read_stop(stdout)
             vim.uv.read_stop(stderr)
-            M.create_output_buffer(command, table.concat(output))
             M.kill_processes()
         end
         local process_handle = vim.uv.spawn(command, options, on_exit)
@@ -148,8 +141,8 @@ function M.execute(command, async)
         local read_callback = function(err, data)
             if err then
                 print("Error:", err)
-            elseif data then
-                table.insert(output, data)
+            elseif data and M.buffer ~= nil then
+                vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, {data})
             end
         end
         vim.uv.read_start(stdout, read_callback)
