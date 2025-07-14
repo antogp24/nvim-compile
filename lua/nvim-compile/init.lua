@@ -22,9 +22,9 @@ function M.open_file_at(file_path, line, column)
 end
 
 function M.kill_processes()
-    for _, process_handle in pairs(M.process_handles) do
-        if process_handle then
-            vim.uv.kill(process_handle, 'SIGINT')
+    for _, process in pairs(M.process_handles) do
+        if process then
+            process:kill('SIGINT')
         end
     end
     M.process_handles = {}
@@ -115,6 +115,31 @@ function M.create_output_buffer(command, output)
     vim.api.nvim_win_set_height(win, 10)
 end
 
+-- This is why I FUCKING HATE vim.uv
+local function split_command(command)
+    -- This pattern splits on spaces, but preserves quoted strings as single arguments
+    local pattern = '([^%s"]+)"([^"]+)"([^%s"]*)'
+    local parts = {}
+    local i = 1
+
+    -- Iterate over the command string
+    while i <= #command do
+        local start_pos, end_pos, quoted_str, unquoted_str = string.find(command, '([%S]+)', i)
+        if start_pos then
+            if quoted_str then
+                -- Handle quoted string
+                table.insert(parts, quoted_str)
+                i = end_pos + 1
+            else
+                -- Handle non-quoted string
+                table.insert(parts, unquoted_str)
+                i = end_pos + 1
+            end
+        end
+    end
+    return parts[1], vim.list_slice(parts, 2, #parts)
+end
+
 -- @param command string
 -- @param async bool: When set avoids blocking the main thread.
 function M.execute(command, async)
@@ -128,21 +153,25 @@ function M.execute(command, async)
         local stdout = vim.uv.new_pipe()
         local stderr = vim.uv.new_pipe()
 
-        local options = { stdio = {stdin, stdout, stderr} }
+        local executable, arguments = split_command(command)
+        local options = { stdio = {stdin, stdout, stderr}, args = arguments }
         local on_exit = function(code, signal)
-            vim.api.nvim_buf_set_option(M.buffer, "modifiable", false)
-            vim.uv.read_stop(stdout)
-            vim.uv.read_stop(stderr)
-            M.kill_processes()
+            vim.schedule(function()
+                vim.api.nvim_buf_set_option(M.buffer, "modifiable", false)
+                M.kill_processes()
+            end)
         end
-        local process_handle = vim.uv.spawn(command, options, on_exit)
-        table.insert(M.process_handles, process_handle)
+        local handle, pid = vim.uv.spawn(executable, options, on_exit)
+        table.insert(M.process_handles, handle)
 
         local read_callback = function(err, data)
             if err then
                 print("Error:", err)
             elseif data and M.buffer ~= nil then
-                vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, {data})
+                vim.schedule(function()
+                    local lines = vim.split(data, "\n")
+                    vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, lines)
+                end)
             end
         end
         vim.uv.read_start(stdout, read_callback)
@@ -175,8 +204,8 @@ function M.compile_last()
 end
 
 function M.setup()
-    vim.api.nvim_create_user_command("Compile", M.compile, { desc = "Run a compile command" })
-    vim.api.nvim_create_user_command("CompileLast", M.compile_last, { desc = "Run the last compile command" })
+    vim.api.nvim_create_user_command("Compile", M.compile, { desc = "Run a compile command", force = true })
+    vim.api.nvim_create_user_command("CompileLast", M.compile_last, { desc = "Run the last compile command", force = true })
 end
 
 return M
