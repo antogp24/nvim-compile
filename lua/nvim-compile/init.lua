@@ -24,7 +24,7 @@ end
 function M.kill_processes()
     for _, process in pairs(M.process_handles) do
         if process then
-            process:kill('SIGINT')
+            process:kill()
         end
     end
     M.process_handles = {}
@@ -169,8 +169,10 @@ function M.execute(command, async)
                 print("Error:", err)
             elseif data and M.buffer ~= nil then
                 vim.schedule(function()
-                    local lines = vim.split(data, "\n")
-                    vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, lines)
+                    if M.buffer ~= nil then
+                        local lines = vim.split(data, "\n")
+                        vim.api.nvim_buf_set_lines(M.buffer, -1, -1, false, lines)
+                    end
                 end)
             end
         end
