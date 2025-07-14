@@ -72,7 +72,8 @@ function M.open_link_under_cursor()
 	end
 end
 
--- @param output string: From the compile command
+-- @param command string
+-- @param output string: stdout of the command just ran
 function M.create_output_buffer(command, output)
 	local existing_buf = M.get_buffer_by_name(M.BUFFER_NAME)
 	if existing_buf then
@@ -103,6 +104,41 @@ function M.create_output_buffer(command, output)
 	vim.api.nvim_win_set_height(win, 10)
 end
 
+-- @param command string
+-- @param async bool: When set avoids blocking the main thread.
+function M.execute(command, async)
+    if not async then
+        local result = vim.fn.system(command)
+        M.create_output_buffer(command, result)
+    else
+        M.create_output_buffer(command, "running...")
+
+        local stdin = vim.uv.new_pipe()
+        local stdout = vim.uv.new_pipe()
+        local stderr = vim.uv.new_pipe()
+
+        local output = {}
+        local read_callback = function(err, data)
+            if err then
+                print("Error:", err)
+            elseif data then
+                table.insert(output, data)
+            end
+        end
+
+        local options = { stdio = {stdin, stdout, stderr} }
+
+        vim.uv.spawn(command, options, function(code, signal)
+            vim.uv.read_stop(stdout)
+            vim.uv.read_stop(stderr)
+            M.create_output_buffer(command, table.concat(output))
+        end)
+
+        vim.uv.read_start(stdout, read_callback)
+        vim.uv.read_start(stderr, read_callback)
+    end
+end
+
 function M.compile()
 	local command = vim.fn.input("command: ")
 	if string.len(command) == 0 then
@@ -116,16 +152,14 @@ function M.compile()
 		M.last_command = command
 	end
 	assert(command ~= nil)
-	local result = vim.fn.system(command)
-	M.create_output_buffer(command, result)
+	M.execute(command, true)
 end
 
 function M.compile_last()
 	if M.last_command == nil then
 		print("There is no last command.")
 	else
-		local result = vim.fn.system(M.last_command)
-		M.create_output_buffer(M.last_command, result)
+		M.execute(M.last_command, true)
 	end
 end
 
