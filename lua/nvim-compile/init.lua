@@ -116,28 +116,81 @@ function M.create_output_buffer(command, output)
 end
 
 -- This is why I FUCKING HATE vim.uv
-local function split_command(command)
-    -- This pattern splits on spaces, but preserves quoted strings as single arguments
-    local pattern = '([^%s"]+)"([^"]+)"([^%s"]*)'
-    local parts = {}
-    local i = 1
+-- I can't just split the string because quotes are used for grouping.
+--
+-- @param command string
+function M.split_command(command)
+    local command_len = string.len(command)
 
-    -- Iterate over the command string
-    while i <= #command do
-        local start_pos, end_pos, quoted_str, unquoted_str = string.find(command, '([%S]+)', i)
-        if start_pos then
-            if quoted_str then
-                -- Handle quoted string
-                table.insert(parts, quoted_str)
-                i = end_pos + 1
-            else
-                -- Handle non-quoted string
-                table.insert(parts, unquoted_str)
-                i = end_pos + 1
-            end
+    local function is_whitespace(str)
+        return string.match(str, "%s") ~= nil
+    end
+
+    local lexer = {
+        tokens = {},
+        start = 1,
+        current = 1,
+    }
+
+    function lexer:push(token)
+        if string.len(token) > 0 then
+            table.insert(self.tokens, token)
         end
     end
-    return parts[1], vim.list_slice(parts, 2, #parts)
+
+    function lexer:get_current()
+        return string.sub(command, self.current, self.current)
+    end
+
+    function lexer:advance()
+        self.current = self.current + 1
+    end
+
+    function lexer:is_done()
+        return lexer.current > command_len
+    end
+
+    -- @param quote char: Character that wraps the group.
+    -- @param evaluate bool: When set skips the first char after a backslash.
+    function lexer:parse_group(quote, evaluate)
+        self:advance()
+        while not self:is_done() and self:get_current() ~= quote do
+            if self:get_current() == '\\' then
+                self:advance()
+            end
+            self:advance()
+        end
+        if self:is_done() then
+            error("Unterminated string literal")
+        end
+        self:push(string.sub(command, self.start + 1, self.current - 1))
+        self:advance()
+        self.start = self.current
+    end
+
+    while not lexer:is_done() do
+        local c = lexer:get_current()
+        if c == ' ' then
+            local skipped = 1
+            while not lexer:is_done() and is_whitespace(lexer:get_current()) do
+                skipped = skipped + 1
+                lexer:advance()
+            end
+            lexer:push(string.sub(command, lexer.start, lexer.current - skipped))
+            lexer.start = lexer.current
+        elseif c == '"' then
+            lexer:parse_group('"', true)
+        elseif c == "'" then
+            lexer:parse_group("'", false)
+        elseif lexer.current + 1 > command_len then
+            lexer:push(string.sub(command, lexer.start, lexer.current))
+            lexer:advance()
+        else
+            lexer:advance()
+        end
+    end
+
+    return lexer.tokens[1], vim.list_slice(lexer.tokens, 2, #lexer.tokens)
 end
 
 -- @param command string
@@ -153,7 +206,7 @@ function M.execute(command, async)
         local stdout = vim.uv.new_pipe()
         local stderr = vim.uv.new_pipe()
 
-        local executable, arguments = split_command(command)
+        local executable, arguments = M.split_command(command)
         local options = { stdio = {stdin, stdout, stderr}, args = arguments }
         local on_exit = function(code, signal)
             vim.schedule(function()
